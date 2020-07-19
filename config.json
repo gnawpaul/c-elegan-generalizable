@@ -1,0 +1,11 @@
+{
+'epochs':           300,
+'learning rate':    1e-3,
+'lr decay':         200,
+'gamma':            .25,
+'hidden_units':     6,
+'param search':     true,
+'save-folder':      'models',
+'prediction steps':  16,
+'dynamic graph'
+}
