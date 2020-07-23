@@ -7,17 +7,19 @@ from torch_geometric.utils import remove_self_loops, add_self_loops
 class Predictor(nn.Module):
     """Trajectory prediction module."""
 
-    def __init__(self, n_hid, nodes, encoder, decoder_type='MLP'):
+    def __init__(self, n_hid, nodes, encoder,predictor_type='MLP'):
         super(Predictor, self).__init__()
-        assert decoder_type in ['MLP','GNN_Att']
+        assert predictor_type in ['MLP','GNN_Att','Node']
         self.n_hid = n_hid
         self.nodes = nodes
-        self.decoder_type = decoder_type
+        self.predictor_type = predictor_type
         self.encoder = encoder
 
-        if decoder_type == 'MLP':
+        if predictor_type == 'MLP':
             self.gnn  = NRI_MLP(2, n_hid, nodes)
-        elif decoder_type == 'GNN_Att':
+        elif predictor_type == 'Node':
+            self.gnn  = Node_MLP(2, n_hid, 2)
+        elif predictor_type == 'GNN_Att':
             self.gnn  = GNNConv_Weighted(2, n_hid, 2)
 
     def single_step_forward(self, inputs, edge_index, edges, hidden=None):
@@ -51,25 +53,25 @@ class Predictor(nn.Module):
         # Predict position/velocity difference
         return inputs + x, hidden
 
-    def forward(self, inputs, edge_index, edges, decoder_args):
+    def forward(self, inputs, edge_index, edges, predictor_args):
         # inputs.shape:[batch_size*nodes, timesteps, dims]
 
-        assert 'scheduling' in decoder_args
-        assert decoder_args['scheduling'] in ['scheduled_sampling', 'burn_in', 'teacher']
-        assert 'dynamic_graph'      in decoder_args
-        scheduling    = decoder_args['scheduling']
-        dynamic_graph = decoder_args['dynamic_graph']
+        assert 'scheduling' in predictor_args
+        assert predictor_args['scheduling'] in ['scheduled_sampling', 'burn_in', 'teacher']
+        assert 'dynamic_graph'      in predictor_args
+        scheduling    = predictor_args['scheduling']
+        dynamic_graph = predictor_args['dynamic_graph']
         # If schedule sampling, get parameters for schedule. Otherwise, get number of prediction steps.
         if scheduling == 'scheduled_sampling':
-            assert 'epoch'      in decoder_args
-            assert 'last_epoch' in decoder_args
-            epoch, last_epoch = decoder_args['epoch'], decoder_args['last_epoch']
+            assert 'epoch'      in predictor_args
+            assert 'last_epoch' in predictor_args
+            epoch, last_epoch = predictor_args['epoch'], predictor_args['last_epoch']
         elif scheduling == 'teacher':
-            assert 'prediction_steps' in decoder_args
-            pred_steps = decoder_args['prediction_steps']
+            assert 'prediction_steps' in predictor_args
+            pred_steps = predictor_args['prediction_steps']
         else:
-            assert 'burn_in_steps' in decoder_args
-            burn_in = decoder_args['burn_in_steps']
+            assert 'burn_in_steps' in predictor_args
+            burn_in = predictor_args['burn_in_steps']
         n_hid, nodes = self.n_hid, self.nodes
         dims  = inputs.size(-1)
         batch_size = int(inputs.size(0)/nodes)
@@ -184,7 +186,7 @@ class MLP_Attention(nn.Module):
         
         n_hid = self.n_hid
         nodes = self.nodes
-        edges = nodes ** 2 -15
+        edges = nodes ** 2 -nodes
         batch_size = int(inputs.size(0)/nodes)
         timesteps  = inputs.size(1)
         row, col      = edge_index
@@ -280,12 +282,14 @@ class NRI_MLP(nn.Module):
         self.mlp    = MLP(nodes*dims, n_hid, n_hid,  bn=True)
         self.fc_out = nn.Linear(n_hid, nodes*dims)
         self.dims   = dims
+        self.m = nn.Tanh()
 
     def forward(self, inputs, edge_index, edge_attr, **kwargs):
         args = kwargs['gnn_args']
         x = inputs.view(args['batch_size']*args['timesteps'],args['nodes']*self.dims)
         x = self.mlp(x)
         x = self.fc_out(x)
+        x = self.m(x)
         x = x.view(args['batch_size']*args['timesteps']*args['nodes'],self.dims)
         return x
 
@@ -298,15 +302,29 @@ class GNNConv_Weighted(MessagePassing):
         self.mlp  = MLP(n_in, n_hid, n_hid,
                         bn=True, run_stats=False)
         self.fc_out   = nn.Linear(n_hid, n_out)
+        self.m = nn.Tanh()
 
     def forward(self, x, edge_index, edge_attr, **kwargs):
         x = x.unsqueeze(-1) if x.dim() == 1 else x
         out = self.mlp(self.propagate(edge_index, x=x, edge_attr=edge_attr), channel=False)
-        return self.fc_out(out)
+        return self.m(self.fc_out(out))
 
     def message(self, x_j, edge_attr):
         msg = torch.einsum('ab,a->ab', x_j, edge_attr.view(-1))
         return msg
+
+class Node_MLP(nn.Module):
+    def __init__(self, dims, n_hid, nodes):
+        super(Node_MLP, self).__init__()
+        self.mlp    = MLP(dims, n_hid, n_hid,  bn=True)
+        self.fc_out = nn.Linear(n_hid, dims)
+        self.dims   = dims
+
+    def forward(self, inputs, edge_index, edge_attr, **kwargs):
+        x = self.mlp(inputs)
+        x = self.fc_out(x)
+        return x
+
     
     
 def reset(nn):
