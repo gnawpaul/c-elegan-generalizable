@@ -22,7 +22,7 @@ class MLPClassifier(torch.nn.Module):
             
         self.MLP_enc  = MLP(2, n_hid, n_hid, bn=True, run_stats=False)
         self.MLP_out  = MLP(nodes*n_hid, n_hid, n_hid)
-        self.fc = nn.Linear(n_hid, states)
+        self.fc = nn.Linear(n_hid, states-1)
         self.nodes = nodes
         self.n_hid = n_hid
 
@@ -56,7 +56,7 @@ class Graph_Attention(nn.Module):
         else:
             n_in = n_hid*(layers+1)
         self.mlp_out = MLP(n_in, n_hid, n_hid, bn=True)
-        self.fc      = nn.Linear(n_hid, states)
+        self.fc      = nn.Linear(n_hid, states-1)
 
         self.n_hid  = n_hid
         self.nodes  = nodes

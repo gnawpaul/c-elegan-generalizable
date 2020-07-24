@@ -134,7 +134,7 @@ def get_data(files):
     path = os.path.abspath('')
     data = []
     for folder in files:
-        data_path = os.path.join(path,'Data',folder)
+        data_path = os.path.join(path,'Data_5_States',folder)
         with open(data_path,'rb') as file:
             data.append(np.squeeze(pk.load(file)))
     return data
@@ -174,6 +174,10 @@ def unique_id(data, worm_index):
     indices = unique_indices(data, worm_index)
     ids=[]
     for element in get_ids(data, worm_index)[indices].tolist():
+        if element[0][0].dtype in ['uint8', '<U1']:
+            continue
+        if element[0][0] in ['---']:
+            continue
         ids.append(np.squeeze(element[0].tolist()).tolist())
     return set(ids)
 
@@ -183,6 +187,10 @@ def unique_indices(data, worm_index):
     # If the id vector has only 1 element (uniquely identified), append the index to the returned list.
     for i, element in enumerate(get_ids(data, worm_index).tolist()):
         if element.size is 1:
+            if element[0][0].dtype in ['uint8', '<U1']:
+                continue
+            if element[0][0] in ['---']:
+                continue
             indices.append(i)
     return indices
 

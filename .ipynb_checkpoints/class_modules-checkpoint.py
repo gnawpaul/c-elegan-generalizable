@@ -20,9 +20,11 @@ class MLPClassifier(torch.nn.Module):
         else:
             n_in = n_hid
             
-        self.MLP_enc  = MLP(2*nodes, n_hid, n_hid, bn=True, run_stats=False)
-        self.fc = nn.Linear(n_hid, states)
+        self.MLP_enc  = MLP(2, n_hid, n_hid, bn=True, run_stats=False)
+        self.MLP_out  = MLP(nodes*n_hid, n_hid, n_hid)
+        self.fc = nn.Linear(n_hid, states-1)
         self.nodes = nodes
+        self.n_hid = n_hid
 
     def forward(self, x, class_args):
         # x.shape: [batch_size*latent_nodes, timesteps, dims]
@@ -31,59 +33,36 @@ class MLPClassifier(torch.nn.Module):
         timesteps = x.size(1)
         dims = x.size(2)
         x = x.view(batch_size, nodes, timesteps, dims).transpose(1,2).contiguous()
-        x = x.reshape(batch_size,timesteps, nodes*dims)
+        x = x.reshape(batch_size*timesteps, nodes,dims)
         x = self.MLP_enc(x)
-        # x.shape: [batch_size, timesteps, n_hid]
+        # x.shape: [batch_size, timesteps, nodes, n_hid]
+        x = self.MLP_out(x.reshape(batch_size*timesteps, nodes*self.n_hid))
         x = F.softmax(self.fc(x),dim=-1)
         return x, torch.zeros(1)
 
 class Graph_Attention(nn.Module):
-    """GAT, SAGE, and GIN w/ attention."""
 
     def __init__(self, n_hid, states, nodes, cat=True, dynamic_graph=False):
         super(Graph_Attention, self).__init__()
         layers = 1
 
         self.mlp_enc = MLP(2, n_hid, n_hid, bn=True, run_stats=False)
-        self.gconv = nn.ModuleList([GNNConv_Weighted(n_hid, n_hid, n_hid) for i in range(layers)])
-        self.att = nn.ModuleList([MLP_Attention(n_hid, cat=True) for i in range(layers)])
+        self.gconv = GNNConv_Weighted(n_hid, n_hid, n_hid)
+        self.att = MLP_Attention(n_hid, cat=True)
+        self.aggr_mlp= MLP(n_hid,n_hid,1, bn=True)
 
-        self.aggr_mlp= nn.ModuleList([MLP(n_hid,n_hid,1, bn=True) for _ in range(layers)])
-        self.aggr    = nn.ModuleList([GlobalAttention(self.aggr_mlp[i]) for i in range(layers)])
         if cat==True:
             n_in = n_hid*nodes*(layers+1)
         else:
             n_in = n_hid*(layers+1)
         self.mlp_out = MLP(n_in, n_hid, n_hid, bn=True)
-        self.fc      = nn.Linear(n_hid, states)
+        self.fc      = nn.Linear(n_hid, states-1)
 
         self.n_hid  = n_hid
         self.nodes  = nodes
         self.layers = layers
         self.cat    = cat
         self.dynamic_graph = dynamic_graph
-
-        self.init_weights()
-
-    def init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.ModuleList):
-                for element in m:
-                    self.reset_single_parameters(element)
-            else:
-                self.reset_single_parameters(m)
-
-    def reset_single_parameters(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.xavier_normal_(m.weight.data)
-            m.bias.data.fill_(0.1)
-        elif isinstance(m, nn.BatchNorm1d):
-            m.weight.data.fill_(1)
-            m.bias.data.zero_()
-        elif isinstance(m, MLP):
-            m.init_weights()
-        elif isinstance(m, GNNConv_Weighted):
-            m.reset_parameters()
 
     def forward(self, x, class_args):
         # x.shape: [batch_size*nodes, timesteps, n_hid]
@@ -105,13 +84,12 @@ class Graph_Attention(nn.Module):
         x = x.reshape(batch_size*timesteps*nodes,dims)
         # x.shape: [batch_size*nodes*timesteps, dims]
         feat = self.mlp_enc(x,channel=False)
-
         hid = []
         edge_attr_list = []
         hid.append(feat)
-        edge_attr, batch_edge_attr = self.att[i](x, edge_index, batch_size, nodes, timesteps, dynamic_graph=self.dynamic_graph )
+        edge_attr, batch_edge_attr = self.att(x, edge_index, batch_size, nodes, timesteps, dynamic_graph=self.dynamic_graph )
         edge_attr_list.append(edge_attr)
-        feat = self.gconv[i](feat, edge_index, batch_edge_attr)
+        feat = self.gconv(feat, edge_index, batch_edge_attr)
         hid.append(feat)
         edge_attr = torch.stack(edge_attr_list, dim=-1)
         hid = torch.stack(hid, dim=-1)
@@ -119,7 +97,7 @@ class Graph_Attention(nn.Module):
         hid = hid.reshape(batch_size*timesteps*nodes, n_hid, (2))
         # hid.shape[batch_size, nodes, timesteps, n_hid]
         if self.cat:
-            hid = hid.reshape(batch_size*timesteps,n_hid*nodes*(2))
+            hid = hid.reshape(batch_size*timesteps,2*nodes*(n_hid))
         else:
             hid = hid.reshape(batch_size*timesteps,nodes, n_hid*(2))
             hid = torch.sum(hid,dim=1)
@@ -205,7 +183,7 @@ class MLP_Attention(torch.nn.Module):
         # x.shape: [batch_size*timesteps*nodes, dims]
         row, col = edge_index
         n_hid = self.n_hid
-        x = self.mlp(x)
+        x = self.mlp_enc(x)
         if self.cat:
             edge_attr = torch.cat((x[row,:],x[col,:]),dim=-1)
         else:
@@ -227,14 +205,9 @@ class GNNConv_Weighted(MessagePassing):
 
     def __init__(self, n_in, n_hid, n_out):
         super(GNNConv_Weighted, self).__init__(aggr='add')
-        self.reset_parameters()
         self.mlp  = MLP(n_in, n_hid, n_hid,
                         bn=True, run_stats=False)
         self.fc_out   = nn.Linear(n_hid, n_out)
-
-    def reset_parameters(self):
-        reset(self.nn)
-        self.eps.data.fill_(self.initial_eps)
 
 
     def forward(self, x, edge_index, edge_attr, **kwargs):
@@ -246,18 +219,17 @@ class GNNConv_Weighted(MessagePassing):
         msg = torch.einsum('ab,a->ab', x_j, edge_attr.view(-1))
         return msg
 
-    
-def reset(nn):
-    def _reset(item):
-        if hasattr(item, 'reset_parameters'):
-            item.reset_parameters()
+class Node_MLP(nn.Module):
+    def __init__(self, dims, n_hid, nodes):
+        super(Node_MLP, self).__init__()
+        self.mlp    = MLP(dims, n_hid, n_hid,  b_norm=True)
+        self.fc_out = nn.Linear(n_hid, dims)
+        self.dims   = dims
 
-    if nn is not None:
-        if hasattr(nn, 'children') and len(list(nn.children())) > 0:
-            for item in nn.children():
-                _reset(item)
-        else:
-            _reset(nn)
+    def forward(self, inputs, edge_index, edge_attr, **kwargs):
+        x = self.mlp(inputs)
+        x = self.fc_out(x)
+        return x
 
 def glorot(tensor):
     if tensor is not None:
